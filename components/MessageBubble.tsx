@@ -1,13 +1,8 @@
-/**
- * WHISPR — MessageBubble Component
- *
- * Renders a single message with sender/receiver styling,
- * timestamp, and read/delivered indicators.
- */
-
 import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import type { DecryptedMessage } from '../types';
+import ImageMessage from './ImageMessage';
+import VoicePlayer from './VoicePlayer';
 
 interface MessageBubbleProps {
   message: DecryptedMessage;
@@ -27,8 +22,8 @@ function getStatusIcon(message: DecryptedMessage): string {
 }
 
 function getStatusColor(message: DecryptedMessage): string {
-  if (message.read) return '#6C63FF'; // Purple accent when read
-  return '#8E8E93'; // Grey for sent/delivered
+  if (message.read) return '#FFFFFF'; // White/bright on user bubbles
+  return 'rgba(255, 255, 255, 0.6)';
 }
 
 function formatTime(date: Date): string {
@@ -38,6 +33,9 @@ function formatTime(date: Date): string {
 export default function MessageBubble({ message }: MessageBubbleProps) {
   const statusIcon = getStatusIcon(message);
   const statusColor = getStatusColor(message);
+
+  const isImage = message.messageType === 'image';
+  const isVoice = message.messageType === 'voice';
 
   return (
     <View
@@ -50,22 +48,29 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
         style={[
           styles.bubble,
           message.isMine ? styles.myBubble : styles.theirBubble,
+          isImage && styles.imageBubble,
         ]}
       >
-        <Text
-          style={[
-            styles.messageText,
-            message.isMine ? styles.myText : styles.theirText,
-          ]}
-        >
-          {message.content}
-        </Text>
-        <View style={styles.metaRow}>
-          <Text style={styles.timestamp}>
+        {isImage ? (
+          <ImageMessage message={message} />
+        ) : isVoice ? (
+          <VoicePlayer message={message} />
+        ) : (
+          <Text
+            style={[
+              styles.messageText,
+              message.isMine ? styles.myText : styles.theirText,
+            ]}
+          >
+            {message.content}
+          </Text>
+        )}
+        <View style={[styles.metaRow, isImage && styles.imageMetaRow]}>
+          <Text style={[styles.timestamp, isImage && styles.imageTimestamp]}>
             {formatTime(message.createdAt)}
           </Text>
           {message.isMine && statusIcon ? (
-            <Text style={[styles.status, { color: statusColor }]}>
+            <Text style={[styles.status, { color: isImage ? '#FFFFFF' : statusColor }]}>
               {' '}{statusIcon}
             </Text>
           ) : null}
@@ -125,4 +130,25 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '600',
   },
+  imageBubble: {
+    paddingHorizontal: 0,
+    paddingTop: 0,
+    paddingBottom: 0,
+    backgroundColor: 'transparent',
+    borderWidth: 0,
+  },
+  imageMetaRow: {
+    position: 'absolute',
+    bottom: 6,
+    right: 10,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 8,
+  },
+  imageTimestamp: {
+    color: '#FFFFFF',
+    fontSize: 10,
+  },
 });
+

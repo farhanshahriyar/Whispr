@@ -1,7 +1,6 @@
 /**
  * WHISPR — Type Definitions
  *
- * All types match the Supabase schema in supabase_schema.sql.
  * These types are used throughout the app for type safety.
  */
 
@@ -83,6 +82,8 @@ export interface DecryptedMessage {
   receiverId: string;
   content: string;
   messageType: 'text' | 'image' | 'voice';
+  fileUrl?: string | null;
+  encryptedKey?: string | null;
   delivered: boolean;
   read: boolean;
   createdAt: Date;

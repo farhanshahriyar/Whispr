@@ -7,9 +7,9 @@
       "DOM",
       "ESNext"
     ],
-    "module": "nodenext",
+    "module": "esnext",
     "moduleDetection": "force",
-    "moduleResolution": "nodenext",
+    "moduleResolution": "bundler",
     "customConditions": [
       "react-native"
     ],

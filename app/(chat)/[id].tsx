@@ -29,6 +29,9 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useNavigation } from 'expo-router';
 import Svg, { Path } from 'react-native-svg';
+import * as ImagePicker from 'expo-image-picker';
+import { Audio } from 'expo-av';
+import * as FileSystem from 'expo-file-system/legacy';
 import { supabase } from '../../lib/supabase';
 import { getPrivateKeys, getReceiverPublicKeys } from '../../lib/keystore';
 import {
@@ -36,7 +39,9 @@ import {
   deriveMessageKey,
   encryptMessage,
   decryptMessage,
+  encryptFileKey,
 } from '../../lib/crypto';
+import { encryptFile } from '../../lib/fileEncryption';
 import { useRealtime } from '../../hooks/useRealtime';
 import MessageBubble from '../../components/MessageBubble';
 import type { DecryptedMessage, Message } from '../../types';
@@ -56,6 +61,16 @@ export default function ChatScreen() {
   const [messageKey, setMessageKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const flatListRef = useRef<FlatList>(null);
+  
+  // Media sharing and recording states (Phase 2)
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingInstance, setRecordingInstance] = useState<Audio.Recording | null>(null);
+  const [recordingDuration, setRecordingDuration] = useState(0);
+  const recordingTimerRef = useRef<any>(null);
+  const recordingStartTimeRef = useRef<number | null>(null);
+  const startXRef = useRef<number>(0);
+  const isCancelledRef = useRef<boolean>(false);
   const insets = useSafeAreaInsets();
   const { width: screenWidth } = useWindowDimensions();
 
@@ -162,6 +177,8 @@ export default function ChatScreen() {
               receiverId: msg.receiver_id,
               content,
               messageType: msg.message_type,
+              fileUrl: msg.file_url,
+              encryptedKey: msg.encrypted_key,
               delivered: msg.delivered,
               read: msg.read,
               createdAt: new Date(msg.created_at),
@@ -174,6 +191,8 @@ export default function ChatScreen() {
               receiverId: msg.receiver_id,
               content: '🔒 Unable to decrypt',
               messageType: msg.message_type,
+              fileUrl: msg.file_url,
+              encryptedKey: msg.encrypted_key,
               delivered: msg.delivered,
               read: msg.read,
               createdAt: new Date(msg.created_at),
@@ -318,6 +337,263 @@ export default function ChatScreen() {
     }
   }
 
+  /**
+   * Encrypt, upload to storage, and send public-key encrypted file key message
+   */
+  async function sendMediaMessage(localUri: string, type: 'image' | 'voice') {
+    if (!messageKey || !currentUserId || !receiverUserId) return;
+
+    setSending(true);
+    setUploadProgress(0);
+
+    try {
+      // 1. Encrypt file bytes on device
+      const { encryptedBytes, fileKeyHex } = await encryptFile(localUri);
+
+      // 2. Generate unique filename for storage
+      const fileExtension = type === 'image' ? 'jpg' : 'm4a';
+      const fileName = `${currentUserId}/${Date.now()}.${fileExtension}`;
+
+      // 3. Upload encrypted bytes to Supabase Storage media bucket
+      const { data: uploadData, error: uploadError } = await supabase.storage
+        .from('media')
+        .upload(fileName, encryptedBytes, {
+          contentType: 'application/octet-stream',
+          onUploadProgress: (progress: any) => {
+            const percent = Math.round((progress.loaded / progress.total) * 100);
+            setUploadProgress(percent);
+          },
+        } as any);
+
+      if (uploadError) throw uploadError;
+
+      // Get public URL
+      const { data: { publicUrl } } = supabase.storage
+        .from('media')
+        .getPublicUrl(fileName);
+
+      // 4. Fetch receiver's public keys
+      const receiverKeys = await getReceiverPublicKeys(receiverUserId);
+      if (!receiverKeys) throw new Error('Receiver public keys not found');
+
+      // Fetch my private keys
+      const privateKeys = await getPrivateKeys();
+      if (!privateKeys) throw new Error('Private keys not found');
+
+      // 5. Encrypt file key for receiver using public-key encryption (ECDH nacl.box)
+      const encryptedKey = await encryptFileKey(
+        fileKeyHex,
+        receiverKeys.signed_prekey,
+        privateKeys.prekeyPrivateKey
+      );
+
+      // 6. Encrypt message placeholder using conversation key
+      const placeholderText = type === 'image' ? '📷 Image' : '🎵 Voice message';
+      const { ciphertext, nonce } = await encryptMessage(placeholderText, messageKey);
+
+      // 7. Insert message record
+      const { data, error: insertError } = await supabase
+        .from('messages')
+        .insert({
+          sender_id: currentUserId,
+          receiver_id: receiverUserId,
+          ciphertext,
+          nonce,
+          message_type: type,
+          file_url: publicUrl,
+          encrypted_key: encryptedKey,
+        })
+        .select()
+        .single();
+
+      if (insertError) throw insertError;
+
+      // 8. Optimistic update
+      if (data) {
+        const newMsg: DecryptedMessage = {
+          id: data.id,
+          senderId: currentUserId,
+          receiverId: receiverUserId,
+          content: placeholderText,
+          messageType: type,
+          fileUrl: publicUrl,
+          encryptedKey: encryptedKey,
+          delivered: false,
+          read: false,
+          createdAt: new Date(data.created_at),
+          isMine: true,
+        };
+        setMessages(prev => [...prev, newMsg]);
+        setTimeout(() => {
+          flatListRef.current?.scrollToEnd({ animated: true });
+        }, 100);
+      }
+    } catch (err) {
+      console.error('Error sending media message:', err);
+      Alert.alert('Error', `Failed to send ${type === 'image' ? 'image' : 'voice message'}. Please try again.`);
+    } finally {
+      setSending(false);
+      setUploadProgress(null);
+    }
+  }
+
+  /**
+   * Launch camera or gallery to pick image
+   */
+  async function selectImage(useCamera: boolean) {
+    try {
+      const permissionResult = useCamera
+        ? await ImagePicker.requestCameraPermissionsAsync()
+        : await ImagePicker.requestMediaLibraryPermissionsAsync();
+
+      if (!permissionResult.granted) {
+        Alert.alert('Permission Denied', `Permission to access the ${useCamera ? 'camera' : 'gallery'} is required.`);
+        return;
+      }
+
+      const result = useCamera
+        ? await ImagePicker.launchCameraAsync({
+            mediaTypes: ImagePicker.MediaTypeOptions.Images,
+            allowsEditing: true,
+            quality: 0.7,
+          })
+        : await ImagePicker.launchImageLibraryAsync({
+            mediaTypes: ImagePicker.MediaTypeOptions.Images,
+            allowsEditing: true,
+            quality: 0.7,
+          });
+
+      if (!result.canceled && result.assets && result.assets.length > 0) {
+        const uri = result.assets[0].uri;
+        await sendMediaMessage(uri, 'image');
+      }
+    } catch (err) {
+      Alert.alert('Error', 'Failed to pick image.');
+    }
+  }
+
+  /**
+   * Display attachment selection dialog
+   */
+  function showAttachmentOptions() {
+    Alert.alert(
+      'Send Media',
+      'Choose an option:',
+      [
+        { text: '📷 Take Photo', onPress: () => selectImage(true) },
+        { text: '🖼️ Choose from Gallery', onPress: () => selectImage(false) },
+        { text: 'Cancel', style: 'cancel' },
+      ]
+    );
+  }
+
+  /**
+   * Start recording audio
+   */
+  async function handleStartRecording() {
+    try {
+      const permission = await Audio.requestPermissionsAsync();
+      if (!permission.granted) {
+        Alert.alert('Permission Denied', 'Microphone permission is required to record voice notes.');
+        return;
+      }
+
+      // Configure audio session for recording
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+      });
+
+      const { recording } = await Audio.Recording.createAsync(
+        Audio.RecordingOptionsPresets.HIGH_QUALITY
+      );
+
+      setRecordingInstance(recording);
+      setIsRecording(true);
+      setRecordingDuration(0);
+      recordingStartTimeRef.current = Date.now();
+
+      recordingTimerRef.current = setInterval(() => {
+        setRecordingDuration((prev) => {
+          if (prev >= 300) { // 5 minutes limit
+            handleStopRecording(true);
+            return 300;
+          }
+          return prev + 1;
+        });
+      }, 1000);
+    } catch (err) {
+      console.error('Failed to start recording:', err);
+      Alert.alert('Error', 'Failed to start recording voice note.');
+    }
+  }
+
+  /**
+   * Stop recording audio
+   */
+  async function handleStopRecording(shouldSend: boolean) {
+    if (recordingTimerRef.current) {
+      clearInterval(recordingTimerRef.current);
+      recordingTimerRef.current = null;
+    }
+
+    if (!recordingInstance) return;
+
+    setIsRecording(false);
+    try {
+      await recordingInstance.stopAndUnloadAsync();
+      const uri = recordingInstance.getURI();
+      setRecordingInstance(null);
+      setRecordingDuration(0);
+
+      const durationMs = Date.now() - (recordingStartTimeRef.current || Date.now());
+      recordingStartTimeRef.current = null;
+
+      if (shouldSend && uri) {
+        if (durationMs < 1000) {
+          Alert.alert('Hold to Record', 'Hold the microphone button to record. Release to send.');
+          await FileSystem.deleteAsync(uri, { idempotent: true });
+        } else {
+          await sendMediaMessage(uri, 'voice');
+        }
+      } else if (uri) {
+        // Discarded recording
+        await FileSystem.deleteAsync(uri, { idempotent: true });
+      }
+    } catch (err) {
+      console.error('Failed to stop recording:', err);
+    }
+  }
+
+  function formatDuration(seconds: number): string {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  }
+
+  // Swipe-to-cancel gestures via Touch events
+  function handleTouchStart(e: any) {
+    startXRef.current = e.nativeEvent.pageX;
+    isCancelledRef.current = false;
+    handleStartRecording();
+  }
+
+  function handleTouchMove(e: any) {
+    if (isCancelledRef.current || !isRecording) return;
+    const currentX = e.nativeEvent.pageX;
+    // Slide left by 60px to cancel
+    if (startXRef.current - currentX > 60) {
+      isCancelledRef.current = true;
+      handleStopRecording(false);
+      Alert.alert('Recording Discarded', 'Voice note recording was deleted.');
+    }
+  }
+
+  function handleTouchEnd() {
+    if (isCancelledRef.current) return;
+    handleStopRecording(true);
+  }
+
   // Error state
   if (error) {
     return (
@@ -364,59 +640,114 @@ export default function ChatScreen() {
         />
       )}
 
+      {/* Upload progress indicator */}
+      {uploadProgress !== null && (
+        <View style={styles.progressContainer}>
+          <ActivityIndicator size="small" color="#6C63FF" style={{ marginRight: 8 }} />
+          <Text style={styles.progressText}>Uploading encrypted media: {uploadProgress}%</Text>
+        </View>
+      )}
+
       {/* Input bar */}
       <View style={[styles.inputBar, { paddingHorizontal: inputBarPadH, paddingBottom: Math.max(insets.bottom, 10) }]}>
-        <TextInput
-          style={[styles.textInput, { paddingHorizontal: inputHorizontalPad, maxHeight: inputMaxHeight, marginRight: inputBarPadH * 0.8 }]}
-          placeholder="Type a message..."
-          placeholderTextColor="#555"
-          value={inputText}
-          onChangeText={setInputText}
-          multiline
-          maxLength={5000}
-          editable={!loading && !sending && !!messageKey}
-        />
-        <TouchableOpacity
-          style={[
-            styles.sendButton,
-            {
-              width: sendBtnSize,
-              height: sendBtnSize,
-              borderRadius: sendBtnSize * 0.28,
-              backgroundColor: isDisabled ? '#1E1E2E' : '#FFFFFF',
-            },
-            !isDisabled && {
-              shadowColor: '#000',
-              shadowOffset: { width: 0, height: 2 },
-              shadowOpacity: 0.15,
-              shadowRadius: 3,
-              elevation: 2,
-            },
-          ]}
-          onPress={handleSend}
-          disabled={isDisabled}
-          activeOpacity={0.75}
-        >
-          {sending ? (
-            <ActivityIndicator color={isDisabled ? '#8E8E93' : '#00A5E3'} size="small" />
-          ) : (
-            <Svg
-              width={sendBtnSize * 0.55}
-              height={sendBtnSize * 0.55}
-              viewBox="0 0 24 24"
-              fill="none"
+        {isRecording ? (
+          <View style={styles.recordingRow}>
+            <Text style={styles.recordingText}>🔴 Recording: {formatDuration(recordingDuration)}</Text>
+            <Text style={styles.slideText}>← Slide left to cancel</Text>
+            <TouchableOpacity
+              style={styles.cancelButton}
+              onPress={() => handleStopRecording(false)}
             >
-              <Path
-                d="M3.5,11.2 L3.5,5.2 C3.5,4.3 4.2,3.6 5.1,3.7 L21.1,11 A0.7,0.7 0 0 1 21.1,11.8 L11.5,11.2 Z"
-                fill={isDisabled ? '#555566' : '#00A5E3'}
-              />
-              <Path
-                d="M3.5,12.8 L3.5,18.8 C3.5,19.7 4.2,20.4 5.1,20.3 L21.1,13 A0.7,0.7 0 0 0 21.1,12.2 L11.5,12.8 Z"
-                fill={isDisabled ? '#444455' : '#0082B4'}
-              />
-            </Svg>
-          )}
-        </TouchableOpacity>
+              <Text style={styles.cancelText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        ) : (
+          <>
+            <TouchableOpacity
+              style={styles.attachButton}
+              onPress={showAttachmentOptions}
+              disabled={loading || sending || !messageKey}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.attachText}>+</Text>
+            </TouchableOpacity>
+            <TextInput
+              style={[styles.textInput, { paddingHorizontal: inputHorizontalPad, maxHeight: inputMaxHeight, marginRight: inputBarPadH * 0.8 }]}
+              placeholder="Type a message..."
+              placeholderTextColor="#555"
+              value={inputText}
+              onChangeText={setInputText}
+              multiline
+              maxLength={5000}
+              editable={!loading && !sending && !!messageKey}
+            />
+          </>
+        )}
+
+        {inputText.trim() !== '' ? (
+          <TouchableOpacity
+            style={[
+              styles.sendButton,
+              {
+                width: sendBtnSize,
+                height: sendBtnSize,
+                borderRadius: sendBtnSize * 0.28,
+                backgroundColor: isDisabled ? '#1E1E2E' : '#FFFFFF',
+              },
+              !isDisabled && {
+                shadowColor: '#000',
+                shadowOffset: { width: 0, height: 2 },
+                shadowOpacity: 0.15,
+                shadowRadius: 3,
+                elevation: 2,
+              },
+            ]}
+            onPress={handleSend}
+            disabled={isDisabled}
+            activeOpacity={0.75}
+          >
+            {sending ? (
+              <ActivityIndicator color={isDisabled ? '#8E8E93' : '#00A5E3'} size="small" />
+            ) : (
+              <Svg
+                width={sendBtnSize * 0.55}
+                height={sendBtnSize * 0.55}
+                viewBox="0 0 24 24"
+                fill="none"
+              >
+                <Path
+                  d="M3.5,11.2 L3.5,5.2 C3.5,4.3 4.2,3.6 5.1,3.7 L21.1,11 A0.7,0.7 0 0 1 21.1,11.8 L11.5,11.2 Z"
+                  fill={isDisabled ? '#555566' : '#00A5E3'}
+                />
+                <Path
+                  d="M3.5,12.8 L3.5,18.8 C3.5,19.7 4.2,20.4 5.1,20.3 L21.1,13 A0.7,0.7 0 0 0 21.1,12.2 L11.5,12.8 Z"
+                  fill={isDisabled ? '#444455' : '#0082B4'}
+                />
+              </Svg>
+            )}
+          </TouchableOpacity>
+        ) : (
+          <View
+            style={[
+              styles.sendButton,
+              {
+                width: sendBtnSize,
+                height: sendBtnSize,
+                borderRadius: sendBtnSize * 0.28,
+                backgroundColor: isRecording ? '#FF453A' : '#1E1E2E',
+              },
+            ]}
+            onTouchStart={(loading || sending || !messageKey) ? undefined : handleTouchStart}
+            onTouchMove={(loading || sending || !messageKey) ? undefined : handleTouchMove}
+            onTouchEnd={(loading || sending || !messageKey) ? undefined : handleTouchEnd}
+          >
+            {sending ? (
+              <ActivityIndicator color="#6C63FF" size="small" />
+            ) : (
+              <Text style={{ fontSize: 18, color: isRecording ? '#FFFFFF' : '#8E8E93' }}>🎙️</Text>
+            )}
+          </View>
+        )}
       </View>
     </KeyboardAvoidingView>
   );
@@ -494,5 +825,63 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: 1,
+  },
+  attachButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#161622',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 8,
+    borderWidth: 1,
+    borderColor: '#2A2A3E',
+  },
+  attachText: {
+    color: '#FFFFFF',
+    fontSize: 22,
+    fontWeight: '300',
+    marginTop: -2,
+  },
+  progressContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#0F0F18',
+    paddingVertical: 10,
+    borderTopWidth: 0.5,
+    borderTopColor: '#1E1E2E',
+  },
+  progressText: {
+    color: '#8E8E93',
+    fontSize: 13,
+  },
+  recordingRow: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingRight: 8,
+  },
+  recordingText: {
+    color: '#FF453A',
+    fontWeight: '700',
+    fontSize: 14,
+  },
+  slideText: {
+    color: '#8E8E93',
+    fontSize: 12,
+    fontStyle: 'italic',
+  },
+  cancelButton: {
+    backgroundColor: '#1E1E2E',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  cancelText: {
+    color: '#FF453A',
+    fontSize: 12,
+    fontWeight: '600',
   },
 });

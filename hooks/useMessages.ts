@@ -101,7 +101,6 @@ export function useMessages(
             `and(sender_id.eq.${currentUserId},receiver_id.eq.${receiverUserId}),` +
             `and(sender_id.eq.${receiverUserId},receiver_id.eq.${currentUserId})`
           )
-          .eq('message_type', 'text')
           .order('created_at', { ascending: true });
 
         if (fetchError) {
@@ -121,6 +120,8 @@ export function useMessages(
               receiverId: msg.receiver_id,
               content,
               messageType: msg.message_type,
+              fileUrl: msg.file_url,
+              encryptedKey: msg.encrypted_key,
               delivered: msg.delivered,
               read: msg.read,
               createdAt: new Date(msg.created_at),
@@ -134,6 +135,8 @@ export function useMessages(
               receiverId: msg.receiver_id,
               content: '🔒 Unable to decrypt message',
               messageType: msg.message_type,
+              fileUrl: msg.file_url,
+              encryptedKey: msg.encrypted_key,
               delivered: msg.delivered,
               read: msg.read,
               createdAt: new Date(msg.created_at),

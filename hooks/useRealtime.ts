@@ -76,7 +76,6 @@ export function useRealtime({
 
           // Only handle messages from the current conversation partner
           if (msg.sender_id !== receiverUserId) return;
-          if (msg.message_type !== 'text') return;
 
           const key = messageKeyRef.current;
           if (!key) return;
@@ -91,6 +90,8 @@ export function useRealtime({
               receiverId: msg.receiver_id,
               content,
               messageType: msg.message_type,
+              fileUrl: msg.file_url,
+              encryptedKey: msg.encrypted_key,
               delivered: msg.delivered,
               read: msg.read,
               createdAt: new Date(msg.created_at),
@@ -107,6 +108,8 @@ export function useRealtime({
               receiverId: msg.receiver_id,
               content: '🔒 Unable to decrypt message',
               messageType: msg.message_type,
+              fileUrl: msg.file_url,
+              encryptedKey: msg.encrypted_key,
               delivered: msg.delivered,
               read: msg.read,
               createdAt: new Date(msg.created_at),
