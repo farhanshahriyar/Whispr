@@ -1,0 +1,35 @@
+{
+  "name": "whispr",
+  "version": "1.0.0",
+  "main": "index.ts",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.108.1",
+    "expo": "~54.0.0",
+    "expo-constants": "~18.0.13",
+    "expo-crypto": "~15.0.9",
+    "expo-linking": "~8.0.12",
+    "expo-router": "~6.0.24",
+    "expo-secure-store": "~15.0.8",
+    "expo-status-bar": "~3.0.9",
+    "js-sha512": "^0.8.0",
+    "react": "19.1.0",
+    "react-native": "0.81.5",
+    "react-native-gesture-handler": "~2.28.0",
+    "react-native-safe-area-context": "~5.6.0",
+    "react-native-screens": "~4.16.0",
+    "react-native-svg": "^15.15.5",
+    "react-native-url-polyfill": "^3.0.0",
+    "tweetnacl": "^1.0.3"
+  },
+  "devDependencies": {
+    "@types/react": "~19.1.10",
+    "typescript": "~5.9.2"
+  },
+  "scripts": {
+    "start": "expo start",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "web": "expo start --web"
+  },
+  "private": true
+}

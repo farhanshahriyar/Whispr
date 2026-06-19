@@ -1,0 +1,9 @@
+# ===========================================
+# WHISPR — Environment Variables
+# ===========================================
+
+# Supabase project URL (from Settings → API in Supabase dashboard)
+EXPO_PUBLIC_SUPABASE_URL=https://your-project-id.supabase.co
+
+# Supabase anonymous/public key (from Settings → API in Supabase dashboard)
+EXPO_PUBLIC_SUPABASE_ANON_KEY=your-anon-key-here
