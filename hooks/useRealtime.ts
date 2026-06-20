@@ -1,8 +1,8 @@
 /**
  * WHISPR — useRealtime Hook
  *
- * Subscribes to Supabase Realtime for live message delivery and read receipts.
- * New messages are decrypted on-device before displaying.
+ * Subscribes to Supabase Realtime for live message delivery, read receipts,
+ * and message deletions (unsend).
  */
 
 import { useEffect, useRef } from 'react';
@@ -21,12 +21,15 @@ interface UseRealtimeOptions {
   onNewMessage: (message: DecryptedMessage) => void;
   /** Callback when a message's read/delivered status changes */
   onMessageUpdate: (messageId: string, updates: { delivered?: boolean; read?: boolean }) => void;
+  /** Callback when a message is deleted (unsent) by the other user */
+  onMessageDelete?: (messageId: string) => void;
 }
 
 /**
  * Hook that subscribes to Supabase Realtime for:
  *   1. New incoming messages → decrypt and display
  *   2. Message status updates → update delivered/read indicators
+ *   3. Message deletions → remove from UI (unsend feature)
  *
  * Handles auto-reconnection automatically via Supabase Realtime.
  */
@@ -36,10 +39,12 @@ export function useRealtime({
   messageKey,
   onNewMessage,
   onMessageUpdate,
+  onMessageDelete,
 }: UseRealtimeOptions): void {
   // Use refs for callbacks to avoid resubscribing on every render
   const onNewMessageRef = useRef(onNewMessage);
   const onMessageUpdateRef = useRef(onMessageUpdate);
+  const onMessageDeleteRef = useRef(onMessageDelete);
   const messageKeyRef = useRef(messageKey);
 
   useEffect(() => {
@@ -49,6 +54,10 @@ export function useRealtime({
   useEffect(() => {
     onMessageUpdateRef.current = onMessageUpdate;
   }, [onMessageUpdate]);
+
+  useEffect(() => {
+    onMessageDeleteRef.current = onMessageDelete;
+  }, [onMessageDelete]);
 
   useEffect(() => {
     messageKeyRef.current = messageKey;
@@ -137,6 +146,33 @@ export function useRealtime({
             delivered: updated.delivered,
             read: updated.read,
           });
+        }
+      )
+      // Listen for message deletions (unsend for everyone)
+      .on(
+        'postgres_changes',
+        {
+          event: 'DELETE',
+          schema: 'public',
+          table: 'messages',
+        },
+        (payload) => {
+          const deleted = payload.old as Partial<Message>;
+          if (!deleted.id) return;
+
+          // If REPLICA IDENTITY FULL is set, we can filter by conversation.
+          // If not, sender_id/receiver_id may be missing — in that case,
+          // we still forward the delete and let the chat screen check
+          // against its own local message list.
+          if (deleted.sender_id && deleted.receiver_id) {
+            const isFromConversation =
+              (deleted.sender_id === receiverUserId && deleted.receiver_id === currentUserId) ||
+              (deleted.sender_id === currentUserId && deleted.receiver_id === receiverUserId);
+
+            if (!isFromConversation) return;
+          }
+
+          onMessageDeleteRef.current?.(deleted.id);
         }
       )
       .subscribe();

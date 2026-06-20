@@ -68,35 +68,44 @@ export async function decryptAndCacheFileFromUrl(
 
   try {
     // 2. Download the encrypted file to a temporary location
-    await downloadAsync(url, tempEncryptedPath);
+    const downloadResult = await downloadAsync(url, tempEncryptedPath);
+    if (!downloadResult || (downloadResult.status && downloadResult.status >= 400)) {
+      throw new Error(`Download failed with status ${downloadResult?.status ?? 'unknown'}`);
+    }
 
-    // 3. Read the encrypted file as Base64
+    // 3. Verify the temp file actually exists before reading
+    const tempInfo = await getInfoAsync(tempEncryptedPath);
+    if (!tempInfo.exists) {
+      throw new Error('Downloaded file not found on disk');
+    }
+
+    // 4. Read the encrypted file as Base64
     const encryptedBase64 = await readAsStringAsync(tempEncryptedPath, {
       encoding: 'base64',
     });
 
-    // 4. Convert Base64 string to Uint8Array
+    // 5. Clean up temp file now that we've read it
+    await deleteAsync(tempEncryptedPath, { idempotent: true }).catch(() => {});
+
+    // 6. Convert Base64 string to Uint8Array
     const encryptedBytes = base64ToBytes(encryptedBase64);
 
-    // 5. Decrypt the bytes
+    // 7. Decrypt the bytes
     const decryptedBytes = decryptFileBytes(encryptedBytes, fileKeyHex);
 
-    // 6. Convert decrypted bytes back to Base64
+    // 8. Convert decrypted bytes back to Base64
     const decryptedBase64 = bytesToBase64(decryptedBytes);
 
-    // 7. Write the decrypted Base64 to the final cached path
+    // 9. Write the decrypted Base64 to the final cached path
     await writeAsStringAsync(decryptedCachePath, decryptedBase64, {
       encoding: 'base64',
     });
 
     return decryptedCachePath;
-  } finally {
-    // Clean up the temporary encrypted file
-    try {
-      await deleteAsync(tempEncryptedPath, { idempotent: true });
-    } catch (e) {
-      console.warn('Failed to delete temporary encrypted file:', e);
-    }
+  } catch (err) {
+    // Clean up temp file on error
+    await deleteAsync(tempEncryptedPath, { idempotent: true }).catch(() => {});
+    throw err;
   }
 }
 

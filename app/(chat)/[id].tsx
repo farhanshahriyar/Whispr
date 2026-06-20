@@ -25,6 +25,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   useWindowDimensions,
+  Modal,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useNavigation } from 'expo-router';
@@ -68,10 +69,15 @@ export default function ChatScreen() {
   const [isRecording, setIsRecording] = useState(false);
   const [recordingInstance, setRecordingInstance] = useState<Audio.Recording | null>(null);
   const [recordingDuration, setRecordingDuration] = useState(0);
+  const [showMediaModal, setShowMediaModal] = useState(false);
+  const [selectedMessage, setSelectedMessage] = useState<DecryptedMessage | null>(null);
+  const [showMessageActions, setShowMessageActions] = useState(false);
+  const [removedMessageIds, setRemovedMessageIds] = useState<Set<string>>(new Set());
   const recordingTimerRef = useRef<any>(null);
   const recordingStartTimeRef = useRef<number | null>(null);
   const startXRef = useRef<number>(0);
   const isCancelledRef = useRef<boolean>(false);
+  const isStoppingRef = useRef<boolean>(false);
   const insets = useSafeAreaInsets();
   const { width: screenWidth } = useWindowDimensions();
 
@@ -367,6 +373,13 @@ export default function ChatScreen() {
     []
   );
 
+  const handleMessageDelete = useCallback(
+    (messageId: string) => {
+      setMessages(prev => prev.filter(msg => msg.id !== messageId));
+    },
+    []
+  );
+
   // Realtime subscription
   useRealtime({
     currentUserId: currentUserId || '',
@@ -374,7 +387,80 @@ export default function ChatScreen() {
     messageKey,
     onNewMessage: handleNewMessage,
     onMessageUpdate: handleMessageUpdate,
+    onMessageDelete: handleMessageDelete,
   });
+
+  /**
+   * Long-press message handler — shows action modal
+   */
+  function handleMessageLongPress(message: DecryptedMessage) {
+    setSelectedMessage(message);
+    setShowMessageActions(true);
+  }
+
+  /**
+   * Unsend for Everyone — deletes message from Supabase (sender only).
+   * The Realtime DELETE event will remove it from the receiver's UI.
+   */
+  async function handleUnsendForEveryone() {
+    const messageToDelete = selectedMessage;
+    if (!messageToDelete || !currentUserId) return;
+
+    // Close modal immediately
+    setShowMessageActions(false);
+    setSelectedMessage(null);
+
+    try {
+      // Use .select() so we can verify rows were actually deleted.
+      // Without it, Supabase returns { data: null, error: null } even when
+      // RLS silently blocks the delete (0 rows affected, no error).
+      const { data, error: deleteError } = await supabase
+        .from('messages')
+        .delete()
+        .eq('id', messageToDelete.id)
+        .eq('sender_id', currentUserId)
+        .select();
+
+      if (deleteError) throw deleteError;
+
+      // Verify the delete actually happened
+      if (!data || data.length === 0) {
+        throw new Error(
+          'Message could not be deleted. Please ensure the DELETE policy exists in your Supabase database.'
+        );
+      }
+
+      // Remove from local state immediately
+      setMessages(prev => prev.filter(msg => msg.id !== messageToDelete.id));
+    } catch (err) {
+      console.error('Failed to unsend message:', err);
+      Alert.alert(
+        'Unsend Failed',
+        err instanceof Error
+          ? err.message
+          : 'Failed to unsend message. Please try again.'
+      );
+    }
+  }
+
+  /**
+   * Remove for You — hides message locally only.
+   * The message remains in the database for the other user.
+   */
+  function handleRemoveForYou() {
+    const messageToRemove = selectedMessage;
+    if (!messageToRemove) return;
+
+    setShowMessageActions(false);
+    setSelectedMessage(null);
+
+    setRemovedMessageIds(prev => {
+      const next = new Set(prev);
+      next.add(messageToRemove.id);
+      return next;
+    });
+    setMessages(prev => prev.filter(msg => msg.id !== messageToRemove.id));
+  }
 
   /**
    * Step 4: Send an encrypted message
@@ -578,21 +664,16 @@ export default function ChatScreen() {
    * Display attachment selection dialog
    */
   function showAttachmentOptions() {
-    Alert.alert(
-      'Send Media',
-      'Choose an option:',
-      [
-        { text: '📷 Take Photo', onPress: () => selectImage(true) },
-        { text: '🖼️ Choose from Gallery', onPress: () => selectImage(false) },
-        { text: 'Cancel', style: 'cancel' },
-      ]
-    );
+    setShowMediaModal(true);
   }
 
   /**
    * Start recording audio
    */
   async function handleStartRecording() {
+    // Guard: don't re-start if we're currently stopping a recording
+    if (isStoppingRef.current || isRecording) return;
+
     try {
       const permission = await Audio.requestPermissionsAsync();
       if (!permission.granted) {
@@ -647,19 +728,26 @@ export default function ChatScreen() {
    * Stop recording audio
    */
   async function handleStopRecording(shouldSend: boolean) {
+    // Prevent re-entrant calls
+    if (isStoppingRef.current) return;
+    isStoppingRef.current = true;
+
     if (recordingTimerRef.current) {
       clearInterval(recordingTimerRef.current);
       recordingTimerRef.current = null;
     }
 
-    if (!recordingInstance) return;
+    if (!recordingInstance) {
+      setIsRecording(false);
+      isStoppingRef.current = false;
+      return;
+    }
 
     setIsRecording(false);
+
     try {
       await recordingInstance.stopAndUnloadAsync();
       const uri = recordingInstance.getURI();
-      setRecordingInstance(null);
-      setRecordingDuration(0);
 
       const durationMs = Date.now() - (recordingStartTimeRef.current || Date.now());
       recordingStartTimeRef.current = null;
@@ -677,6 +765,15 @@ export default function ChatScreen() {
       }
     } catch (err) {
       console.error('Failed to stop recording:', err);
+    } finally {
+      // Always clean up state, even on error
+      setRecordingInstance(null);
+      setRecordingDuration(0);
+      recordingStartTimeRef.current = null;
+      // Allow new recordings after a brief cooldown
+      setTimeout(() => {
+        isStoppingRef.current = false;
+      }, 500);
     }
   }
 
@@ -688,6 +785,7 @@ export default function ChatScreen() {
 
   // Swipe-to-cancel gestures via Touch events
   function handleTouchStart(e: any) {
+    if (isStoppingRef.current || isRecording) return;
     startXRef.current = e.nativeEvent.pageX;
     isCancelledRef.current = false;
     handleStartRecording();
@@ -735,7 +833,13 @@ export default function ChatScreen() {
         <FlatList
           ref={flatListRef}
           data={messages}
-          renderItem={({ item }) => <MessageBubble message={item} partnerUsername={username} />}
+          renderItem={({ item }) => (
+            <MessageBubble
+              message={item}
+              partnerUsername={username}
+              onLongPress={handleMessageLongPress}
+            />
+          )}
           keyExtractor={item => item.id}
           style={styles.messageList}
           contentContainerStyle={styles.messageListContent}
@@ -778,7 +882,7 @@ export default function ChatScreen() {
               </TouchableOpacity>
             </View>
             
-            <View
+            <TouchableOpacity
               style={[
                 styles.sendButton,
                 {
@@ -788,16 +892,18 @@ export default function ChatScreen() {
                   backgroundColor: '#FF453A',
                 },
               ]}
-              onTouchStart={(loading || sending || !messageKey) ? undefined : handleTouchStart}
-              onTouchMove={(loading || sending || !messageKey) ? undefined : handleTouchMove}
-              onTouchEnd={(loading || sending || !messageKey) ? undefined : handleTouchEnd}
+              activeOpacity={0.7}
+              onPress={() => handleStopRecording(true)}
+              disabled={loading || sending || !messageKey}
             >
               {sending ? (
                 <ActivityIndicator color="#6C63FF" size="small" />
               ) : (
-                <Text style={{ fontSize: 18, color: '#FFFFFF' }}>🎙️</Text>
+                <Svg width={sendBtnSize * 0.5} height={sendBtnSize * 0.5} viewBox="0 0 24 24" fill="none">
+                  <Path d="M6 6h12v12H6z" fill="#FFFFFF" />
+                </Svg>
               )}
-            </View>
+            </TouchableOpacity>
           </>
         ) : (
           <>
@@ -841,7 +947,10 @@ export default function ChatScreen() {
               {sending ? (
                 <ActivityIndicator color="#6C63FF" size="small" />
               ) : (
-                <Text style={{ fontSize: 18, color: '#8E8E93' }}>🎙️</Text>
+                <Svg width={sendBtnSize * 0.5} height={sendBtnSize * 0.5} viewBox="0 0 24 24" fill="none">
+                  <Path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3Z" fill="#8E8E93" />
+                  <Path d="M19 10v2a7 7 0 0 1-14 0v-2H3v2a9 9 0 0 0 8 8.94V23h2v-2.06A9 9 0 0 0 21 12v-2h-2Z" fill="#8E8E93" />
+                </Svg>
               )}
             </View>
 
@@ -890,6 +999,146 @@ export default function ChatScreen() {
           </>
         )}
       </View>
+
+      {/* Media Options Custom Modal */}
+      <Modal
+        visible={showMediaModal}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowMediaModal(false)}
+      >
+        <TouchableOpacity
+          style={styles.mediaModalOverlay}
+          activeOpacity={1}
+          onPress={() => setShowMediaModal(false)}
+        >
+          <TouchableOpacity activeOpacity={1} onPress={() => {}}>
+            <View style={styles.mediaModalContent}>
+              <View style={styles.mediaModalHandle} />
+              <Text style={styles.mediaModalTitle}>Send Media</Text>
+              
+              <View style={styles.mediaModalGrid}>
+                <TouchableOpacity
+                  style={styles.mediaModalOption}
+                  activeOpacity={0.7}
+                  onPress={() => {
+                    setShowMediaModal(false);
+                    setTimeout(() => selectImage(true), 350);
+                  }}
+                >
+                  <View style={[styles.mediaIconContainer, { backgroundColor: '#6C63FF' }]}>
+                    <Text style={styles.mediaIconEmoji}>📷</Text>
+                  </View>
+                  <Text style={styles.mediaOptionText}>Take Photo</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={styles.mediaModalOption}
+                  activeOpacity={0.7}
+                  onPress={() => {
+                    setShowMediaModal(false);
+                    setTimeout(() => selectImage(false), 350);
+                  }}
+                >
+                  <View style={[styles.mediaIconContainer, { backgroundColor: '#00A5E3' }]}>
+                    <Text style={styles.mediaIconEmoji}>🖼️</Text>
+                  </View>
+                  <Text style={styles.mediaOptionText}>Choose Gallery</Text>
+                </TouchableOpacity>
+              </View>
+
+              <TouchableOpacity
+                style={styles.mediaCancelButton}
+                activeOpacity={0.7}
+                onPress={() => setShowMediaModal(false)}
+              >
+                <Text style={styles.mediaCancelText}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+          </TouchableOpacity>
+        </TouchableOpacity>
+      </Modal>
+
+      {/* Message Actions Modal (Messenger-style) */}
+      <Modal
+        visible={showMessageActions}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          setShowMessageActions(false);
+          setSelectedMessage(null);
+        }}
+      >
+        <TouchableOpacity
+          style={styles.msgActionOverlay}
+          activeOpacity={1}
+          onPress={() => {
+            setShowMessageActions(false);
+            setSelectedMessage(null);
+          }}
+        >
+          <TouchableOpacity activeOpacity={1} onPress={() => {}}>
+            <View style={styles.msgActionContent}>
+              <View style={styles.msgActionHandle} />
+
+              {/* Message preview */}
+              <View style={styles.msgActionPreview}>
+                <Text style={styles.msgActionPreviewText} numberOfLines={2}>
+                  {selectedMessage?.messageType === 'image'
+                    ? '📷 Image'
+                    : selectedMessage?.messageType === 'voice'
+                    ? '🎵 Voice message'
+                    : selectedMessage?.content || ''}
+                </Text>
+              </View>
+
+              {/* Unsend for Everyone (sender only) */}
+              {selectedMessage?.isMine && (
+                <TouchableOpacity
+                  style={styles.msgActionButton}
+                  activeOpacity={0.7}
+                  onPress={handleUnsendForEveryone}
+                >
+                  <View style={[styles.msgActionIcon, { backgroundColor: '#FF453A' }]}>
+                    <Text style={styles.msgActionIconText}>↩</Text>
+                  </View>
+                  <View style={styles.msgActionLabelGroup}>
+                    <Text style={styles.msgActionLabel}>Unsend for Everyone</Text>
+                    <Text style={styles.msgActionSublabel}>This message will be removed for all participants</Text>
+                  </View>
+                </TouchableOpacity>
+              )}
+
+              {/* Remove for You */}
+              <TouchableOpacity
+                style={styles.msgActionButton}
+                activeOpacity={0.7}
+                onPress={handleRemoveForYou}
+              >
+                <View style={[styles.msgActionIcon, { backgroundColor: '#8E8E93' }]}>
+                  <Text style={styles.msgActionIconText}>🗑</Text>
+                </View>
+                <View style={styles.msgActionLabelGroup}>
+                  <Text style={styles.msgActionLabel}>Remove for You</Text>
+                  <Text style={styles.msgActionSublabel}>This message will be removed for you only</Text>
+                </View>
+              </TouchableOpacity>
+
+              {/* Cancel */}
+              <TouchableOpacity
+                style={styles.msgActionCancelButton}
+                activeOpacity={0.7}
+                onPress={() => {
+                  setShowMessageActions(false);
+                  setSelectedMessage(null);
+                }}
+              >
+                <Text style={styles.msgActionCancelText}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+          </TouchableOpacity>
+        </TouchableOpacity>
+      </Modal>
     </KeyboardAvoidingView>
   );
 }
@@ -1023,6 +1272,171 @@ const styles = StyleSheet.create({
   cancelText: {
     color: '#FF453A',
     fontSize: 12,
+    fontWeight: '600',
+  },
+  mediaModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(5, 5, 10, 0.75)',
+    justifyContent: 'flex-end',
+  },
+  mediaModalContent: {
+    backgroundColor: '#12121F',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingHorizontal: 24,
+    paddingTop: 16,
+    paddingBottom: 36,
+    borderWidth: 1,
+    borderColor: '#1E1E2E',
+    borderBottomWidth: 0,
+  },
+  mediaModalHandle: {
+    width: 40,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: '#2A2A3E',
+    alignSelf: 'center',
+    marginBottom: 20,
+  },
+  mediaModalTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#FFFFFF',
+    marginBottom: 24,
+    textAlign: 'center',
+  },
+  mediaModalGrid: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    marginBottom: 24,
+    gap: 16,
+  },
+  mediaModalOption: {
+    alignItems: 'center',
+    flex: 1,
+    paddingVertical: 20,
+    backgroundColor: '#1A1A2E',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#2A2A3E',
+  },
+  mediaIconContainer: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  mediaIconEmoji: {
+    fontSize: 26,
+  },
+  mediaOptionText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  mediaCancelButton: {
+    backgroundColor: '#1A1A2E',
+    borderRadius: 16,
+    paddingVertical: 14,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#2A2A3E',
+  },
+  mediaCancelText: {
+    color: '#FF453A',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  msgActionOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(5, 5, 10, 0.8)',
+    justifyContent: 'flex-end',
+  },
+  msgActionContent: {
+    backgroundColor: '#12121F',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingHorizontal: 20,
+    paddingTop: 16,
+    paddingBottom: 36,
+    borderWidth: 1,
+    borderColor: '#1E1E2E',
+    borderBottomWidth: 0,
+  },
+  msgActionHandle: {
+    width: 40,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: '#2A2A3E',
+    alignSelf: 'center',
+    marginBottom: 20,
+  },
+  msgActionPreview: {
+    backgroundColor: '#1A1A2E',
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    marginBottom: 20,
+    borderWidth: 1,
+    borderColor: '#2A2A3E',
+  },
+  msgActionPreviewText: {
+    color: '#8E8E93',
+    fontSize: 14,
+    fontStyle: 'italic',
+  },
+  msgActionButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 14,
+    paddingHorizontal: 4,
+    borderBottomWidth: 0.5,
+    borderBottomColor: '#1E1E2E',
+  },
+  msgActionIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 14,
+  },
+  msgActionIconText: {
+    fontSize: 18,
+    color: '#FFFFFF',
+  },
+  msgActionLabelGroup: {
+    flex: 1,
+  },
+  msgActionLabel: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '600',
+    marginBottom: 2,
+  },
+  msgActionSublabel: {
+    color: '#555566',
+    fontSize: 12,
+  },
+  msgActionCancelButton: {
+    marginTop: 16,
+    backgroundColor: '#1A1A2E',
+    borderRadius: 16,
+    paddingVertical: 14,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#2A2A3E',
+  },
+  msgActionCancelText: {
+    color: '#FF453A',
+    fontSize: 16,
     fontWeight: '600',
   },
 });

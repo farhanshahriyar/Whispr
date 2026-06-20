@@ -1,5 +1,16 @@
 import React, { useState, useEffect } from 'react';
-import { View, Image, StyleSheet, ActivityIndicator, Text } from 'react-native';
+import {
+  View,
+  Image,
+  StyleSheet,
+  ActivityIndicator,
+  Text,
+  TouchableOpacity,
+  Modal,
+  Dimensions,
+  StatusBar,
+  Platform,
+} from 'react-native';
 import { decryptAndCacheFileFromUrl } from '../lib/fileEncryption';
 import { decryptFileKey } from '../lib/crypto';
 import { getPrivateKeys, getReceiverPublicKeys } from '../lib/keystore';
@@ -13,6 +24,7 @@ export default function ImageMessage({ message }: ImageMessageProps) {
   const [uri, setUri] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [showFullscreen, setShowFullscreen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -87,10 +99,60 @@ export default function ImageMessage({ message }: ImageMessageProps) {
     );
   }
 
+  const { width: screenWidth, height: screenHeight } = Dimensions.get('window');
+
   return (
-    <View style={styles.imageContainer}>
-      <Image source={{ uri }} style={styles.image} resizeMode="cover" />
-    </View>
+    <>
+      {/* Thumbnail */}
+      <TouchableOpacity
+        style={styles.imageContainer}
+        activeOpacity={0.85}
+        onPress={() => setShowFullscreen(true)}
+      >
+        <Image source={{ uri }} style={styles.image} resizeMode="cover" />
+      </TouchableOpacity>
+
+      {/* Fullscreen Image Viewer Modal */}
+      <Modal
+        visible={showFullscreen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowFullscreen(false)}
+        statusBarTranslucent={Platform.OS === 'android'}
+      >
+        <View style={styles.fullscreenOverlay}>
+          <StatusBar barStyle="light-content" backgroundColor="rgba(0,0,0,0.95)" />
+
+          {/* Close Button */}
+          <TouchableOpacity
+            style={styles.closeButton}
+            onPress={() => setShowFullscreen(false)}
+            activeOpacity={0.7}
+            hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+          >
+            <View style={styles.closeCircle}>
+              <Text style={styles.closeText}>✕</Text>
+            </View>
+          </TouchableOpacity>
+
+          {/* Full Image */}
+          <TouchableOpacity
+            activeOpacity={1}
+            onPress={() => setShowFullscreen(false)}
+            style={styles.fullImageWrapper}
+          >
+            <Image
+              source={{ uri }}
+              style={{
+                width: screenWidth,
+                height: screenHeight * 0.75,
+              }}
+              resizeMode="contain"
+            />
+          </TouchableOpacity>
+        </View>
+      </Modal>
+    </>
   );
 }
 
@@ -129,5 +191,36 @@ const styles = StyleSheet.create({
   image: {
     width: 240,
     height: 180,
+  },
+  fullscreenOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.95)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  closeButton: {
+    position: 'absolute',
+    top: Platform.OS === 'ios' ? 56 : 40,
+    right: 20,
+    zIndex: 10,
+  },
+  closeCircle: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(255, 255, 255, 0.15)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.2)',
+  },
+  closeText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  fullImageWrapper: {
+    justifyContent: 'center',
+    alignItems: 'center',
   },
 });

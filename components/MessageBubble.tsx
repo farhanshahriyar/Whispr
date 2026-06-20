@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, Text, StyleSheet } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import type { DecryptedMessage } from '../types';
 import ImageMessage from './ImageMessage';
 import VoicePlayer from './VoicePlayer';
@@ -7,6 +7,7 @@ import VoicePlayer from './VoicePlayer';
 interface MessageBubbleProps {
   message: DecryptedMessage;
   partnerUsername?: string;
+  onLongPress?: (message: DecryptedMessage) => void;
 }
 
 /**
@@ -31,7 +32,7 @@ function formatTime(date: Date): string {
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-export default function MessageBubble({ message, partnerUsername }: MessageBubbleProps) {
+export default function MessageBubble({ message, partnerUsername, onLongPress }: MessageBubbleProps) {
   const statusIcon = getStatusIcon(message);
   const statusColor = getStatusColor(message);
 
@@ -59,7 +60,10 @@ export default function MessageBubble({ message, partnerUsername }: MessageBubbl
         message.isMine ? styles.myMessage : styles.theirMessage,
       ]}
     >
-      <View
+      <TouchableOpacity
+        activeOpacity={0.8}
+        onLongPress={() => onLongPress?.(message)}
+        delayLongPress={400}
         style={[
           styles.bubble,
           message.isMine ? styles.myBubble : styles.theirBubble,
@@ -90,7 +94,7 @@ export default function MessageBubble({ message, partnerUsername }: MessageBubbl
             </Text>
           ) : null}
         </View>
-      </View>
+      </TouchableOpacity>
     </View>
   );
 }
@@ -193,4 +197,3 @@ const styles = StyleSheet.create({
     letterSpacing: 0.2,
   },
 });
-
