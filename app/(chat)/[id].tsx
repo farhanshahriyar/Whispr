@@ -47,6 +47,7 @@ import * as ScreenCapture from 'expo-screen-capture';
 import { useRealtime } from '../../hooks/useRealtime';
 import MessageBubble from '../../components/MessageBubble';
 import type { DecryptedMessage, Message } from '../../types';
+import { playSendSound, playReceiveSound } from '../../lib/sounds';
 
 export default function ChatScreen() {
   const { id: receiverUserId, username } = useLocalSearchParams<{
@@ -351,6 +352,11 @@ export default function ChatScreen() {
       return [...prev, message];
     });
 
+    // Play received message sound
+    if (!message.isMine) {
+      playReceiveSound();
+    }
+
     // Mark as read immediately since user has the chat open
     markMessagesAsRead();
 
@@ -506,6 +512,9 @@ export default function ChatScreen() {
         };
         setMessages(prev => [...prev, newMsg]);
 
+        // Play send sound effect
+        playSendSound();
+
         // Scroll to bottom
         setTimeout(() => {
           flatListRef.current?.scrollToEnd({ animated: true });
@@ -612,6 +621,10 @@ export default function ChatScreen() {
           isMine: true,
         };
         setMessages(prev => [...prev, newMsg]);
+        
+        // Play send sound effect
+        playSendSound();
+
         setTimeout(() => {
           flatListRef.current?.scrollToEnd({ animated: true });
         }, 100);
