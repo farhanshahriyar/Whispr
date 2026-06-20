@@ -32,7 +32,7 @@ export interface Message {
   receiver_id: string;
   ciphertext: string;      // AES-256-GCM encrypted blob (base64)
   nonce: string;           // Encryption nonce (base64)
-  message_type: 'text' | 'image' | 'voice';
+  message_type: 'text' | 'image' | 'voice' | 'screenshot_alert';
   file_url: string | null;
   encrypted_key: string | null;
   delivered: boolean;
@@ -81,7 +81,7 @@ export interface DecryptedMessage {
   senderId: string;
   receiverId: string;
   content: string;
-  messageType: 'text' | 'image' | 'voice';
+  messageType: 'text' | 'image' | 'voice' | 'screenshot_alert';
   fileUrl?: string | null;
   encryptedKey?: string | null;
   delivered: boolean;

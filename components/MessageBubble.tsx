@@ -6,6 +6,7 @@ import VoicePlayer from './VoicePlayer';
 
 interface MessageBubbleProps {
   message: DecryptedMessage;
+  partnerUsername?: string;
 }
 
 /**
@@ -30,12 +31,26 @@ function formatTime(date: Date): string {
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-export default function MessageBubble({ message }: MessageBubbleProps) {
+export default function MessageBubble({ message, partnerUsername }: MessageBubbleProps) {
   const statusIcon = getStatusIcon(message);
   const statusColor = getStatusColor(message);
 
   const isImage = message.messageType === 'image';
   const isVoice = message.messageType === 'voice';
+  const isScreenshotAlert = message.messageType === 'screenshot_alert';
+
+  if (isScreenshotAlert) {
+    const displayName = message.isMine ? 'You' : (partnerUsername ? `@${partnerUsername}` : 'The other user');
+    return (
+      <View style={styles.alertContainer}>
+        <View style={styles.alertBadge}>
+          <Text style={styles.alertText}>
+            ⚠️ {displayName} took a screenshot
+          </Text>
+        </View>
+      </View>
+    );
+  }
 
   return (
     <View
@@ -149,6 +164,33 @@ const styles = StyleSheet.create({
   imageTimestamp: {
     color: '#FFFFFF',
     fontSize: 10,
+  },
+  alertContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginVertical: 10,
+    width: '100%',
+  },
+  alertBadge: {
+    backgroundColor: '#2C1B2B',
+    borderColor: '#FF453A',
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    shadowColor: '#FF453A',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.15,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  alertText: {
+    color: '#FF453A',
+    fontSize: 13,
+    fontWeight: '700',
+    letterSpacing: 0.2,
   },
 });
 

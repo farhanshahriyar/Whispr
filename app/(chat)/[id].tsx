@@ -42,6 +42,7 @@ import {
   encryptFileKey,
 } from '../../lib/crypto';
 import { encryptFile } from '../../lib/fileEncryption';
+import * as ScreenCapture from 'expo-screen-capture';
 import { useRealtime } from '../../hooks/useRealtime';
 import MessageBubble from '../../components/MessageBubble';
 import type { DecryptedMessage, Message } from '../../types';
@@ -82,6 +83,101 @@ export default function ChatScreen() {
   const headerBarHeight = Platform.OS === 'ios' ? 44 : 56;
   const kbOffset = insets.top + headerBarHeight;
   const isDisabled = !inputText.trim() || sending || !messageKey;
+
+  // Enable screenshot prevention (this sets native FLAG_SECURE on Android and blocks recordings/screenshots)
+  ScreenCapture.usePreventScreenCapture();
+
+  // Handle screenshot alert creation
+  const handleScreenshotDetected = useCallback(async () => {
+    if (!currentUserId || !receiverUserId || !messageKey) return;
+
+    const conversationId = currentUserId < receiverUserId
+      ? `${currentUserId}:${receiverUserId}`
+      : `${receiverUserId}:${currentUserId}`;
+
+    try {
+      // 1. Insert alert into screenshot_alerts table
+      const { error: alertError } = await supabase
+        .from('screenshot_alerts')
+        .insert({
+          conversation_id: conversationId,
+          triggered_by: currentUserId,
+        });
+
+      if (alertError) {
+        console.error('Failed to log screenshot alert:', alertError.message);
+      }
+
+      // 2. Encrypt alert warning message E2EE
+      const alertPlaceholder = 'took a screenshot';
+      const { ciphertext, nonce } = await encryptMessage(alertPlaceholder, messageKey);
+
+      // 3. Insert encrypted screenshot warning message into messages table
+      const { data, error: insertError } = await supabase
+        .from('messages')
+        .insert({
+          sender_id: currentUserId,
+          receiver_id: receiverUserId,
+          ciphertext,
+          nonce,
+          message_type: 'screenshot_alert',
+        })
+        .select()
+        .single();
+
+      if (insertError) throw insertError;
+
+      // 4. Optimistic update
+      if (data) {
+        const newMsg: DecryptedMessage = {
+          id: data.id,
+          senderId: currentUserId,
+          receiverId: receiverUserId,
+          content: alertPlaceholder,
+          messageType: 'screenshot_alert',
+          delivered: false,
+          read: false,
+          createdAt: new Date(data.created_at),
+          isMine: true,
+        };
+        setMessages(prev => [...prev, newMsg]);
+
+        // Scroll to bottom
+        setTimeout(() => {
+          flatListRef.current?.scrollToEnd({ animated: true });
+        }, 100);
+      }
+    } catch (err) {
+      console.error('Error handling screenshot detection:', err);
+    }
+  }, [currentUserId, receiverUserId, messageKey]);
+
+  // Listen for screenshot events
+  useEffect(() => {
+    if (!messageKey || !currentUserId || !receiverUserId) return;
+    let subscription: any;
+
+    async function setupScreenshotListener() {
+      try {
+        const { status } = await ScreenCapture.requestPermissionsAsync();
+        if (status === 'granted') {
+          subscription = ScreenCapture.addScreenshotListener(() => {
+            handleScreenshotDetected();
+          });
+        }
+      } catch (err) {
+        console.warn('Failed to setup screenshot listener:', err);
+      }
+    }
+
+    setupScreenshotListener();
+
+    return () => {
+      if (subscription) {
+        subscription.remove();
+      }
+    };
+  }, [currentUserId, receiverUserId, messageKey, handleScreenshotDetected]);
 
   // Set the header title to the username
   useEffect(() => {
@@ -350,6 +446,12 @@ export default function ChatScreen() {
       // 1. Encrypt file bytes on device
       const { encryptedBytes, fileKeyHex } = await encryptFile(localUri);
 
+      // Convert Uint8Array to ArrayBuffer for React Native fetch compatibility
+      const arrayBuffer = (encryptedBytes.buffer as ArrayBuffer).slice(
+        encryptedBytes.byteOffset,
+        encryptedBytes.byteOffset + encryptedBytes.byteLength
+      );
+
       // 2. Generate unique filename for storage
       const fileExtension = type === 'image' ? 'jpg' : 'm4a';
       const fileName = `${currentUserId}/${Date.now()}.${fileExtension}`;
@@ -357,7 +459,7 @@ export default function ChatScreen() {
       // 3. Upload encrypted bytes to Supabase Storage media bucket
       const { data: uploadData, error: uploadError } = await supabase.storage
         .from('media')
-        .upload(fileName, encryptedBytes, {
+        .upload(fileName, arrayBuffer, {
           contentType: 'application/octet-stream',
           onUploadProgress: (progress: any) => {
             const percent = Math.round((progress.loaded / progress.total) * 100);
@@ -453,12 +555,12 @@ export default function ChatScreen() {
 
       const result = useCamera
         ? await ImagePicker.launchCameraAsync({
-            mediaTypes: ImagePicker.MediaTypeOptions.Images,
+            mediaTypes: ['images'],
             allowsEditing: true,
             quality: 0.7,
           })
         : await ImagePicker.launchImageLibraryAsync({
-            mediaTypes: ImagePicker.MediaTypeOptions.Images,
+            mediaTypes: ['images'],
             allowsEditing: true,
             quality: 0.7,
           });
@@ -496,6 +598,19 @@ export default function ChatScreen() {
       if (!permission.granted) {
         Alert.alert('Permission Denied', 'Microphone permission is required to record voice notes.');
         return;
+      }
+
+      // Clean up any existing recording instance first
+      if (recordingInstance) {
+        try {
+          const status = await recordingInstance.getStatusAsync();
+          if (status.isRecording || status.canRecord) {
+            await recordingInstance.stopAndUnloadAsync();
+          }
+        } catch {
+          // Already unloaded, ignore
+        }
+        setRecordingInstance(null);
       }
 
       // Configure audio session for recording
@@ -620,7 +735,7 @@ export default function ChatScreen() {
         <FlatList
           ref={flatListRef}
           data={messages}
-          renderItem={({ item }) => <MessageBubble message={item} />}
+          renderItem={({ item }) => <MessageBubble message={item} partnerUsername={username} />}
           keyExtractor={item => item.id}
           style={styles.messageList}
           contentContainerStyle={styles.messageListContent}
@@ -651,16 +766,39 @@ export default function ChatScreen() {
       {/* Input bar */}
       <View style={[styles.inputBar, { paddingHorizontal: inputBarPadH, paddingBottom: Math.max(insets.bottom, 10) }]}>
         {isRecording ? (
-          <View style={styles.recordingRow}>
-            <Text style={styles.recordingText}>🔴 Recording: {formatDuration(recordingDuration)}</Text>
-            <Text style={styles.slideText}>← Slide left to cancel</Text>
-            <TouchableOpacity
-              style={styles.cancelButton}
-              onPress={() => handleStopRecording(false)}
+          <>
+            <View style={styles.recordingRow}>
+              <Text style={styles.recordingText}>🔴 Recording: {formatDuration(recordingDuration)}</Text>
+              <Text style={styles.slideText}>← Slide left to cancel</Text>
+              <TouchableOpacity
+                style={styles.cancelButton}
+                onPress={() => handleStopRecording(false)}
+              >
+                <Text style={styles.cancelText}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+            
+            <View
+              style={[
+                styles.sendButton,
+                {
+                  width: sendBtnSize,
+                  height: sendBtnSize,
+                  borderRadius: sendBtnSize * 0.28,
+                  backgroundColor: '#FF453A',
+                },
+              ]}
+              onTouchStart={(loading || sending || !messageKey) ? undefined : handleTouchStart}
+              onTouchMove={(loading || sending || !messageKey) ? undefined : handleTouchMove}
+              onTouchEnd={(loading || sending || !messageKey) ? undefined : handleTouchEnd}
             >
-              <Text style={styles.cancelText}>Cancel</Text>
-            </TouchableOpacity>
-          </View>
+              {sending ? (
+                <ActivityIndicator color="#6C63FF" size="small" />
+              ) : (
+                <Text style={{ fontSize: 18, color: '#FFFFFF' }}>🎙️</Text>
+              )}
+            </View>
+          </>
         ) : (
           <>
             <TouchableOpacity
@@ -672,7 +810,7 @@ export default function ChatScreen() {
               <Text style={styles.attachText}>+</Text>
             </TouchableOpacity>
             <TextInput
-              style={[styles.textInput, { paddingHorizontal: inputHorizontalPad, maxHeight: inputMaxHeight, marginRight: inputBarPadH * 0.8 }]}
+              style={[styles.textInput, { paddingHorizontal: inputHorizontalPad, maxHeight: inputMaxHeight, marginRight: 8 }]}
               placeholder="Type a message..."
               placeholderTextColor="#555"
               value={inputText}
@@ -680,73 +818,76 @@ export default function ChatScreen() {
               multiline
               maxLength={5000}
               editable={!loading && !sending && !!messageKey}
+              autoCorrect={false}
+              autoComplete="off"
             />
-          </>
-        )}
 
-        {inputText.trim() !== '' ? (
-          <TouchableOpacity
-            style={[
-              styles.sendButton,
-              {
-                width: sendBtnSize,
-                height: sendBtnSize,
-                borderRadius: sendBtnSize * 0.28,
-                backgroundColor: isDisabled ? '#1E1E2E' : '#FFFFFF',
-              },
-              !isDisabled && {
-                shadowColor: '#000',
-                shadowOffset: { width: 0, height: 2 },
-                shadowOpacity: 0.15,
-                shadowRadius: 3,
-                elevation: 2,
-              },
-            ]}
-            onPress={handleSend}
-            disabled={isDisabled}
-            activeOpacity={0.75}
-          >
-            {sending ? (
-              <ActivityIndicator color={isDisabled ? '#8E8E93' : '#00A5E3'} size="small" />
-            ) : (
-              <Svg
-                width={sendBtnSize * 0.55}
-                height={sendBtnSize * 0.55}
-                viewBox="0 0 24 24"
-                fill="none"
-              >
-                <Path
-                  d="M3.5,11.2 L3.5,5.2 C3.5,4.3 4.2,3.6 5.1,3.7 L21.1,11 A0.7,0.7 0 0 1 21.1,11.8 L11.5,11.2 Z"
-                  fill={isDisabled ? '#555566' : '#00A5E3'}
-                />
-                <Path
-                  d="M3.5,12.8 L3.5,18.8 C3.5,19.7 4.2,20.4 5.1,20.3 L21.1,13 A0.7,0.7 0 0 0 21.1,12.2 L11.5,12.8 Z"
-                  fill={isDisabled ? '#444455' : '#0082B4'}
-                />
-              </Svg>
-            )}
-          </TouchableOpacity>
-        ) : (
-          <View
-            style={[
-              styles.sendButton,
-              {
-                width: sendBtnSize,
-                height: sendBtnSize,
-                borderRadius: sendBtnSize * 0.28,
-                backgroundColor: isRecording ? '#FF453A' : '#1E1E2E',
-              },
-            ]}
-            onTouchStart={(loading || sending || !messageKey) ? undefined : handleTouchStart}
-            onTouchMove={(loading || sending || !messageKey) ? undefined : handleTouchMove}
-            onTouchEnd={(loading || sending || !messageKey) ? undefined : handleTouchEnd}
-          >
-            {sending ? (
-              <ActivityIndicator color="#6C63FF" size="small" />
-            ) : (
-              <Text style={{ fontSize: 18, color: isRecording ? '#FFFFFF' : '#8E8E93' }}>🎙️</Text>
-            )}
-          </View>
+            {/* Mic button */}
+            <View
+              style={[
+                styles.sendButton,
+                {
+                  width: sendBtnSize,
+                  height: sendBtnSize,
+                  borderRadius: sendBtnSize * 0.28,
+                  backgroundColor: '#1E1E2E',
+                  marginRight: 6,
+                },
+              ]}
+              onTouchStart={(loading || sending || !messageKey) ? undefined : handleTouchStart}
+              onTouchMove={(loading || sending || !messageKey) ? undefined : handleTouchMove}
+              onTouchEnd={(loading || sending || !messageKey) ? undefined : handleTouchEnd}
+            >
+              {sending ? (
+                <ActivityIndicator color="#6C63FF" size="small" />
+              ) : (
+                <Text style={{ fontSize: 18, color: '#8E8E93' }}>🎙️</Text>
+              )}
+            </View>
+
+            {/* Send button (always visible, disabled if no text) */}
+            <TouchableOpacity
+              style={[
+                styles.sendButton,
+                {
+                  width: sendBtnSize,
+                  height: sendBtnSize,
+                  borderRadius: sendBtnSize * 0.28,
+                  backgroundColor: isDisabled ? '#1E1E2E' : '#FFFFFF',
+                },
+                !isDisabled && {
+                  shadowColor: '#000',
+                  shadowOffset: { width: 0, height: 2 },
+                  shadowOpacity: 0.15,
+                  shadowRadius: 3,
+                  elevation: 2,
+                },
+              ]}
+              onPress={handleSend}
+              disabled={isDisabled}
+              activeOpacity={0.75}
+            >
+              {sending ? (
+                <ActivityIndicator color={isDisabled ? '#8E8E93' : '#00A5E3'} size="small" />
+              ) : (
+                <Svg
+                  width={sendBtnSize * 0.55}
+                  height={sendBtnSize * 0.55}
+                  viewBox="0 0 24 24"
+                  fill="none"
+                >
+                  <Path
+                    d="M3.5,11.2 L3.5,5.2 C3.5,4.3 4.2,3.6 5.1,3.7 L21.1,11 A0.7,0.7 0 0 1 21.1,11.8 L11.5,11.2 Z"
+                    fill={isDisabled ? '#555566' : '#00A5E3'}
+                  />
+                  <Path
+                    d="M3.5,12.8 L3.5,18.8 C3.5,19.7 4.2,20.4 5.1,20.3 L21.1,13 A0.7,0.7 0 0 0 21.1,12.2 L11.5,12.8 Z"
+                    fill={isDisabled ? '#444455' : '#0082B4'}
+                  />
+                </Svg>
+              )}
+            </TouchableOpacity>
+          </>
         )}
       </View>
     </KeyboardAvoidingView>

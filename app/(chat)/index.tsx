@@ -88,7 +88,7 @@ export default function ConversationListScreen() {
       // Fetch all messages involving this user
       const { data: messages, error } = await supabase
         .from('messages')
-        .select('sender_id, receiver_id, ciphertext, nonce, created_at, read')
+        .select('sender_id, receiver_id, ciphertext, nonce, message_type, created_at, read')
         .or(`sender_id.eq.${currentUserId},receiver_id.eq.${currentUserId}`)
         .order('created_at', { ascending: false });
 
@@ -144,21 +144,31 @@ export default function ConversationListScreen() {
         // Try to decrypt the last message for preview
         if (privateKeys) {
           try {
-            const receiverKeys = await getReceiverPublicKeys(partnerId);
-            if (receiverKeys) {
-              const sharedSecret = await deriveSharedSecret(
-                privateKeys.prekeyPrivateKey,
-                receiverKeys.signed_prekey
-              );
-              const msgKey = await deriveMessageKey(sharedSecret);
-              lastMessage = await decryptMessage(
-                data.lastMsg.ciphertext,
-                data.lastMsg.nonce,
-                msgKey
-              );
-              // Truncate for preview
-              if (lastMessage.length > 40) {
-                lastMessage = lastMessage.substring(0, 40) + '...';
+            // Use special labels for non-text message types
+            const msgType = (data.lastMsg as any).message_type;
+            if (msgType === 'screenshot_alert') {
+              lastMessage = '⚠️ Screenshot taken';
+            } else if (msgType === 'image') {
+              lastMessage = '📷 Image';
+            } else if (msgType === 'voice') {
+              lastMessage = '🎵 Voice message';
+            } else {
+              const receiverKeys = await getReceiverPublicKeys(partnerId);
+              if (receiverKeys) {
+                const sharedSecret = await deriveSharedSecret(
+                  privateKeys.prekeyPrivateKey,
+                  receiverKeys.signed_prekey
+                );
+                const msgKey = await deriveMessageKey(sharedSecret);
+                lastMessage = await decryptMessage(
+                  data.lastMsg.ciphertext,
+                  data.lastMsg.nonce,
+                  msgKey
+                );
+                // Truncate for preview
+                if (lastMessage.length > 40) {
+                  lastMessage = lastMessage.substring(0, 40) + '...';
+                }
               }
             }
           } catch {
